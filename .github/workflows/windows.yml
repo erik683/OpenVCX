@@ -1,0 +1,19 @@
+name: Windows offline checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and run offline harnesses and export check
+        shell: powershell
+        run: ./build_DLL_core.ps1 -Archs ${{ matrix.arch }} -Toolchain msvc
