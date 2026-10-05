@@ -80,7 +80,7 @@ static DWORD WINAPI receive_during_write(LPVOID unused)
     SetEvent(rx_attempted);
     if (acquired) LeaveCriticalSection(&s_chan);
     uint8_t frame[15] = {0x80,0,0,0, 0,0,0,0, 0,5, 0,0,7,0xE8,0x62};
-    route_rx(0, frame, sizeof(frame));
+    route_rx(0, frame, sizeof(frame), 0);
     return 0;
 }
 
@@ -186,9 +186,30 @@ static void periodic_wire_contract(void)
     CHECK(!fw_periodic_eligible(0x9001, 0, 5));
 }
 
+/* Frames in one serial read are back-dated by the bytes after them, and
+ * internal stamps stay increasing across reads, long idle periods and wrap. */
+static void rx_stamp_contract(void)
+{
+    uint64_t last = 999000;
+    CHECK(rx_byte_stamp(1000000, 24, 0, &last) == 1000000 - 249);  /* 23 bytes * 10.85 us */
+    CHECK(rx_byte_stamp(1000000, 24, 23, &last) == 1000000);
+    CHECK(rx_byte_stamp(1000100, 24, 0, &last) == 1000001);       /* not before the previous read */
+    last = 0xFFFFFFF0u;
+    CHECK(rx_byte_stamp(0x100000005ull, 1, 0, &last) == 5);
+    CHECK(last == 0x100000005ull);
+    /* A warm reader may stay idle past the signed or full 32-bit clock range. */
+    last = 1000000;
+    CHECK(rx_byte_stamp(2401000000ull, 1, 0, &last) == 2401000000u);
+    CHECK(last == 2401000000ull);
+    last = 1000000;
+    CHECK(rx_byte_stamp(0x100000000ull + 2401000000ull, 1, 0, &last) == 2401000000u);
+    CHECK(last == 0x100000000ull + 2401000000ull);
+}
+
 int main(void)
 {
     dev_init(GetModuleHandle(NULL));
+    rx_stamp_contract();
     periodic_wire_contract();
     uint32_t id;
     for (uint32_t kind = J2534_PASS_FILTER; kind <= J2534_BLOCK_FILTER; kind++) {
@@ -213,7 +234,7 @@ int main(void)
         CHECK(dev_channel_add(1, J2534_ISO15765) != NULL);
         CHECK(filter(J2534_PASS_FILTER, &id) == 0);
         uint8_t rx[15] = {0x80,0,0,0, 0,0,0,0, 0,5, 0,0,7,0xE8,0x62};
-        route_rx(0, rx, sizeof(rx));
+        route_rx(0, rx, sizeof(rx), 0);
         CHECK(s_channels[0].count == 1);
     }
 

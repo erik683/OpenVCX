@@ -75,7 +75,7 @@ static void push(uint32_t status)
 {
     uint8_t bytes[5] = {0,0,7,0xE8,0x62};
     EnterCriticalSection(&s_chan);
-    CHECK(chan_push_locked(&s_channels[0], status, bytes, sizeof(bytes)) == CHAN_PUSH_OK);
+    CHECK(chan_push_locked(&s_channels[0], status, bytes, sizeof(bytes), 0) == CHAN_PUSH_OK);
     LeaveCriticalSection(&s_chan);
 }
 
@@ -86,7 +86,7 @@ static long init_test_send(unsigned long ch, uint32_t flag, const uint8_t *data,
     if (flag == 8 && !init_silent) {
         uint8_t keys[6] = {0x55,0x08,0x94,(uint8_t)(init_baud >> 8),(uint8_t)init_baud,0};
         EnterCriticalSection(&s_chan);
-        CHECK(chan_push_locked(&s_channels[0], 0, keys, sizeof(keys)) == CHAN_PUSH_OK);
+        CHECK(chan_push_locked(&s_channels[0], 0, keys, sizeof(keys), 0) == CHAN_PUSH_OK);
         LeaveCriticalSection(&s_chan);
     }
     return 0;
@@ -244,7 +244,7 @@ static void repeat_reply(const uint8_t *data, unsigned n, uint32_t status)
     frame[4] = (uint8_t)(status >> 24); frame[5] = (uint8_t)(status >> 16);
     frame[6] = (uint8_t)(status >> 8); frame[7] = (uint8_t)status;
     frame[9] = (uint8_t)n; memcpy(frame + 10, data, n);
-    route_rx(0, frame, 10 + (int)n);
+    route_rx(0, frame, 10 + (int)n, 0);
 }
 /* Honda K-line reply [hdr][len][data][cs] whose byte at position n-1 is v and
  * whose total length is n+1 -- 01 04 v cs for ABS (n=3), 07 05 01 v cs for
@@ -603,6 +603,29 @@ int main(void)
     CHECK(PassThruStartPeriodicMsg(1, &msg, &id, 100) == ERR_MSG_PROTOCOL_ID);
     CHECK(controls == before);
 
+    /* HDS SRS keepalive: HONDA_DIAGH_PS message, interval
+     * 3000, on an ISO9141 channel driving pin 7.  Accepted only in
+     * vendor-compatible mode, only for that pair and pin. */
+    {
+        PASSTHRU_MSG ka = {0}; unsigned long kid = 0xDEAD;
+        static const uint8_t ka_data[] = {0x60, 0x05, 0x70, 0x02, 0x29};
+        ka.ProtocolID = J2534_2_HONDA_DIAGH_PS; ka.TxFlags = 0x200;
+        ka.DataSize = sizeof(ka_data); memcpy(ka.Data, ka_data, sizeof(ka_data));
+        reset(J2534_ISO9141); s_uart_pin[0] = 7;
+        CHECK(PassThruStartPeriodicMsg(1, &ka, &kid, 3000) == STATUS_NOERROR);
+        CHECK(kid != 0xDEAD);
+        reset(J2534_ISO9141); s_uart_pin[0] = 7; s_strict_validation = true; kid = 0xDEAD;
+        CHECK(PassThruStartPeriodicMsg(1, &ka, &kid, 3000) == ERR_MSG_PROTOCOL_ID);
+        reset(J2534_ISO9141); s_uart_pin[0] = 1; before = controls;
+        CHECK(PassThruStartPeriodicMsg(1, &ka, &kid, 3000) == ERR_MSG_PROTOCOL_ID);
+        reset(J2534_CAN); s_uart_pin[0] = 7;
+        CHECK(PassThruStartPeriodicMsg(1, &ka, &kid, 3000) == ERR_MSG_PROTOCOL_ID);
+        reset(J2534_ISO9141); s_uart_pin[0] = 7; ka.ProtocolID = J2534_2_ISO9141_PS;
+        CHECK(PassThruStartPeriodicMsg(1, &ka, &kid, 3000) == ERR_MSG_PROTOCOL_ID);
+        CHECK(kid == 0xDEAD);
+        s_uart_pin[0] = 0; reset(J2534_CAN); before = controls;
+    }
+
     unsigned long value = 0xDEADBEEF;
     CHECK(PassThruIoctl(99, J2534_IOCTL_READ_VBATT, NULL, &value) == ERR_INVALID_DEVICE_ID);
     CHECK(PassThruIoctl(99, J2534_IOCTL_CLEAR_FUNCT_MSG_LOOKUP_TABLE, NULL, NULL) == ERR_INVALID_CHANNEL_ID);
@@ -648,8 +671,8 @@ int main(void)
     push(J2534_RX_START_OF_MESSAGE);
     count = 3;
     CHECK(PassThruReadMsgs(1, batch, &count, 0) == 0 && count == 3);
-    CHECK(batch[0].Timestamp == 1234000 && batch[0].ExtraDataIndex == batch[0].DataSize);
-    CHECK(batch[1].Timestamp == 0xFFFFFC18u && batch[1].ExtraDataIndex == 0);
+    CHECK(batch[0].Timestamp == 1234 && batch[0].ExtraDataIndex == batch[0].DataSize);
+    CHECK(batch[1].Timestamp == 0xFFFFFFFFu && batch[1].ExtraDataIndex == 0);
     CHECK(batch[2].ExtraDataIndex == 0);
 
     /* Read waiting on an old generation must not consume the replacement. */

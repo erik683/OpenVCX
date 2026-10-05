@@ -17,6 +17,7 @@ static ini_option_t s_ini[] = {
     {"log_level", "VCX_NANO_LOG_LEVEL"}, {"hex_max", "VCX_NANO_LOG_HEXMAX"},
     {"rx_log_every", "VCX_NANO_LOG_RX_EVERY"}, {"keep_warm", NULL},
     {"repeat_reply_timeout_ms", NULL},
+    {"fast_init_timeout_ms", NULL},
 #ifdef VCX_RESEARCH_CONFIG
     {"license_refresh_ms", "VCX_NANO_LICENSE_REFRESH_MS"},
     {"voltage_policy", "VCX_NANO_VOLTAGE_POLICY"},
@@ -42,6 +43,7 @@ static bool ini_valid(const char *key, const char *v)
     if (!strcmp(key, "hex_max")) return ini_uint(v, 0, INT_MAX);
     if (!strcmp(key, "rx_log_every")) return ini_uint(v, 1, INT_MAX);
     if (!strcmp(key, "repeat_reply_timeout_ms")) return ini_uint(v, 50, 5000);
+    if (!strcmp(key, "fast_init_timeout_ms")) return ini_uint(v, 100, 30000);
     if (!strcmp(key, "keep_warm"))
         return !strcmp(v,"0") || !strcmp(v,"1") || !_stricmp(v,"on") || !_stricmp(v,"off") ||
                !_stricmp(v,"true") || !_stricmp(v,"false");

@@ -538,6 +538,9 @@ static uint32_t s_repeat_seq;
 static volatile LONG s_repeat_awaiting[DEV_MAX_CHANNELS];
 #define REPEAT_REPLY_TIMEOUT_MS 300
 static DWORD s_repeat_reply_timeout_ms = REPEAT_REPLY_TIMEOUT_MS;
+/* vcx_nano.ini fast_init_timeout_ms: a fixed FAST_INIT wait; 0 derives it from
+ * the channel's timing (dev_fast_init_window). */
+static DWORD s_fast_init_timeout_ms;
 static DWORD WINAPI periodic_proc(LPVOID arg);
 
 #ifdef VCX_REPEAT_TEST
@@ -837,6 +840,9 @@ void dev_init(HINSTANCE dll_module)
     s_repeat_reply_timeout_ms = REPEAT_REPLY_TIMEOUT_MS;
     if (ini_get("repeat_reply_timeout_ms", v, sizeof(v)))
         s_repeat_reply_timeout_ms = (DWORD)atoi(v);
+    s_fast_init_timeout_ms = 0;
+    if (ini_get("fast_init_timeout_ms", v, sizeof(v)))
+        s_fast_init_timeout_ms = (DWORD)atoi(v);
 #ifdef VCX_RESEARCH_CONFIG
     /* Session pre-refresh age in ms (0 = reactive-only; install once, then let
      * OPEN's 0xFE retry reinstall on demand).  Default preserves the historical
@@ -1157,10 +1163,44 @@ typedef enum {
     CHAN_PUSH_ALLOC_FAILED,
 } chan_push_result_t;
 
+/* Full host QueryPerformanceCounter clock in microseconds.
+ * The split conversion keeps count * 1e6 from overflowing on long uptimes. */
+static uint64_t host_us64(void)
+{
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart / freq.QuadPart) * 1000000 +
+                      (now.QuadPart % freq.QuadPart) * 1000000 / freq.QuadPart);
+}
+
+uint32_t dev_host_us(void)
+{
+    return (uint32_t)host_us64();
+}
+
+#define VCX_SERIAL_BAUD 921600u
+
+/* Arrival estimate for byte i of an n-byte read that returned at read_us.
+ * Every later byte in the read still had to cross the 8N1 serial line (10 bit
+ * times each), so byte i arrived no later than read_us minus their transfer
+ * time.  Stamps are kept strictly increasing, so stamp order is the serial
+ * arrival order across all channels. Keep ordering in 64 bits so long idle
+ * periods cannot be mistaken for a backward clock step. */
+static uint32_t rx_byte_stamp(uint64_t read_us, DWORD n, DWORD i, uint64_t *last_us)
+{
+    uint64_t after_us = (uint64_t)(n - 1 - i) * 10u * 1000000u / VCX_SERIAL_BAUD;
+    uint64_t stamp = read_us - after_us;
+    if (stamp <= *last_us) stamp = *last_us + 1;
+    *last_us = stamp;
+    return (uint32_t)stamp;
+}
+
 /* The caller reports capacity and allocation failures separately.  Only the
  * former is an application-visible queue overflow. */
 static chan_push_result_t chan_push_locked(dev_channel_t *c, uint32_t rx_status,
-                                           const uint8_t *data, uint16_t len)
+                                           const uint8_t *data, uint16_t len,
+                                           uint32_t stamp_us)
 {
     if (c->count >= DEV_RX_QUEUE_CAP) {
         c->overflowed = true;
@@ -1168,7 +1208,7 @@ static chan_push_result_t chan_push_locked(dev_channel_t *c, uint32_t rx_status,
     }
     rx_msg_t *m = (rx_msg_t *)malloc(sizeof(rx_msg_t) + len);
     if (!m) return CHAN_PUSH_ALLOC_FAILED;
-    m->next = NULL; m->rx_status = rx_status; m->timestamp = GetTickCount();
+    m->next = NULL; m->rx_status = rx_status; m->timestamp = stamp_us;
     m->len = len; if (len) memcpy(m->data, data, len);
     if (c->tail) c->tail->next = m; else c->head = m;
     c->tail = m; c->count++;
@@ -1186,7 +1226,7 @@ static uint32_t chan_protocol(uint32_t wire_id)
     return proto;
 }
 
-static void route_rx(uint8_t chan, const uint8_t *content, int clen)
+static void route_rx(uint8_t chan, const uint8_t *content, int clen, uint32_t stamp_us)
 {
     /* content: 80 <cmd_hi> 00 chan | rxstatus(4 BE) len(2 BE) canid+data(len).
      * The 10-byte floor covers the header the fields below are read from; a
@@ -1223,7 +1263,7 @@ static void route_rx(uint8_t chan, const uint8_t *content, int clen)
             repeat_rx_locked(c, chan, rxstatus, &content[10], len, false);
         } else {
             repeat_rx_locked(c, chan, rxstatus, &content[10], len, len == declared);
-            push = chan_push_locked(c, rxstatus, &content[10], len);
+            push = chan_push_locked(c, rxstatus, &content[10], len, stamp_us);
         }
     }
     LeaveCriticalSection(&s_chan);
@@ -1317,7 +1357,7 @@ static void discard_queued_control_responses(void)
     LeaveCriticalSection(&s_resp_cs);
 }
 
-static void handle_frame(const uint8_t *content, int clen)
+static void handle_frame(const uint8_t *content, int clen, uint32_t stamp_us)
 {
     /* Log before the validity gates, not after: a frame this DLL rejects is
      * precisely the one worth having in the file.  Both of these used to
@@ -1345,7 +1385,7 @@ static void handle_frame(const uint8_t *content, int clen)
     /* On the receive side, cmd_lo==0 is a message (RX event / TxDone echo, seen
      * with cmd_hi 0 or 1); any nonzero cmd_lo is a control reply. */
     if (cmd_lo == VCX_OP_MSG) {
-        route_rx(chan, content, clen);
+        route_rx(chan, content, clen, stamp_us);
     } else {
         queue_control_response(content, clen);
     }
@@ -1360,6 +1400,7 @@ static DWORD WINAPI reader_proc(LPVOID arg)
     static uint8_t buf[2048], frame[4300];
     vcx_parser_t rx;
     vcx_parser_init(&rx, frame, (int)sizeof(frame));
+    uint64_t last_stamp_us = host_us64();
     while (InterlockedCompareExchange(&s_reader_run, 1, 1)) {
         DWORD got = 0;
         log_flush_if_stale(1000);
@@ -1399,11 +1440,14 @@ static DWORD WINAPI reader_proc(LPVOID arg)
             Sleep(1); continue;
         }
         if (got == 0) { Sleep(1); continue; }
+        uint64_t read_us = host_us64();
         InterlockedExchangeAdd(&s_stat.rx_bytes, (LONG)got);
         for (DWORD i = 0; i < got; i++) {
             switch (vcx_parser_push(&rx, buf[i])) {
             case VCX_RX_FRAME:
-                handle_frame(frame, rx.len - 1);
+                /* i is the frame's closing delimiter. */
+                handle_frame(frame, rx.len - 1,
+                             rx_byte_stamp(read_us, got, i, &last_stamp_us));
                 break;
             case VCX_RX_BAD_CSUM:
                 STAT_LOG_HEX(rx_bad_csum, frame, rx.len,
@@ -1598,11 +1642,13 @@ static long vcx_send_msg(uint8_t chan, const uint8_t *payload, int plen,
         log_write_failed(prefix, wrote, flen, gle);
     }
     if (rc == STATUS_NOERROR && nconfirm > 0) {
+        uint32_t stamp_us = dev_host_us();
         dev_channel_t *c = chan_find_locked((uint32_t)chan + 1);
         int lost_full = 0, lost_alloc = 0;
         for (int i = 0; c && i < nconfirm; i++) {
             chan_push_result_t push = chan_push_locked(c, confirm[i].rx_status,
-                                                        confirm[i].data, confirm[i].len);
+                                                        confirm[i].data, confirm[i].len,
+                                                        stamp_us);
             if (push == CHAN_PUSH_FULL) lost_full++;
             else if (push == CHAN_PUSH_ALLOC_FAILED) lost_alloc++;
         }
@@ -1892,7 +1938,7 @@ static bool try_open_once(const char *name)
     }
     DCB dcb; memset(&dcb, 0, sizeof(dcb)); dcb.DCBlength = sizeof(dcb);
     if (!GetCommState(h, &dcb)) log_comm_fail(name, "GetCommState failed", false);
-    dcb.BaudRate = 921600; dcb.ByteSize = 8; dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;
+    dcb.BaudRate = VCX_SERIAL_BAUD; dcb.ByteSize = 8; dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;
     dcb.fBinary = TRUE; dcb.fDtrControl = DTR_CONTROL_ENABLE; dcb.fRtsControl = RTS_CONTROL_ENABLE;
     /* An unchecked SetCommState leaves the link at whatever the port was last
      * set to -- a silent wrong-baud session that looks like a dead device. */
@@ -2457,6 +2503,11 @@ static bool     s_pins_set[DEV_MAX_CHANNELS];
  * Seeded at connect by uart_pin_default() because the firmware's UART engines
  * default this field to 0, not 7. */
 static uint8_t  s_uart_pin[DEV_MAX_CHANNELS];
+
+uint8_t dev_channel_uart_pin(uint32_t wire_id)
+{
+    return (wire_id && wire_id <= DEV_MAX_CHANNELS) ? s_uart_pin[wire_id - 1] : 0;
+}
 /* PassThruConnect Flags for the channel.  Channel-level, so a pin-change reopen
  * (SET_CONFIG repin) must replay their firmware-param mappings alongside the
  * cached comm-params -- a fresh open resets every comm-param. */
@@ -3291,6 +3342,53 @@ void dev_five_baud_end(uint32_t wire_id, bool failed)
     LeaveCriticalSection(&s_link);
 }
 
+/* The firmware's value in us for a K-line timing param: the app's setting as
+ * it was pushed, else the engine's power-on default. */
+static uint64_t kline_timing_us(int ch, uint32_t param, uint32_t fw_default_us)
+{
+    return cfg_has(ch, param) ? j2534_to_vcx_value(param, cfg_get(ch, param)) : fw_default_us;
+}
+
+/* Derive the FAST_INIT wait from idle, wake-up, PDU/echo and end-of-frame
+ * timing, plus a reply window and host slack. Unset values use engine defaults.
+ * min_reply_ms excludes frames arriving before the wake-up pattern could end.
+ * Calls require dev_api_lock. */
+#define FAST_INIT_REPLY_WINDOW_MS 300u
+#define FAST_INIT_HOST_SLACK_MS    50u
+#define FAST_INIT_FLOOR_MS        500u
+#define FAST_INIT_TICK_SLACK_MS    32u
+long dev_fast_init_window(uint32_t wire_id, uint16_t pdu_len,
+                          uint32_t *timeout_ms, uint32_t *min_reply_ms)
+{
+    *timeout_ms = FAST_INIT_FLOOR_MS;
+    *min_reply_ms = 0;
+    if (wire_id == 0 || wire_id > DEV_MAX_CHANNELS) return ERR_INVALID_CHANNEL_ID;
+    int ch = (int)wire_id - 1;
+    uint64_t p1 = kline_timing_us(ch, J2534_CFG_P1_MAX, 20000u);
+    uint64_t p3 = kline_timing_us(ch, J2534_CFG_P3_MIN, 55000u);
+    uint64_t p4 = kline_timing_us(ch, J2534_CFG_P4_MIN, 2000u);
+    uint64_t idle = kline_timing_us(ch, J2534_CFG_TIDLE, 300000u);
+    uint64_t twup = kline_timing_us(ch, J2534_CFG_TWUP, 50000u);
+    uint32_t baud = cfg_get(ch, J2534_CFG_DATA_RATE);
+    uint64_t byte_us = 10000000u / (baud >= 1200u ? baud : 1200u);  /* 10 bits */
+    uint64_t pre = p1 > p3 ? p1 : p3;
+    if (idle > pre) pre = idle;
+    /* Preserve the reply allowance unless the configured P2_MAX needs more. */
+    uint64_t reply_us = (uint64_t)FAST_INIT_REPLY_WINDOW_MS * 1000u;
+    uint64_t p2 = kline_timing_us(ch, J2534_CFG_P2_MAX, 0);
+    if (p2 > reply_us) reply_us = p2;
+    uint64_t us = pre + twup + (uint64_t)pdu_len * (byte_us + p4) + 2u * (p1 + byte_us)
+                + reply_us + (uint64_t)FAST_INIT_HOST_SLACK_MS * 1000u;
+    uint64_t ms = (us + 999u) / 1000u;
+    if (ms < FAST_INIT_FLOOR_MS) ms = FAST_INIT_FLOOR_MS;
+    if (ms > 0xFFFFFFFFu) ms = 0xFFFFFFFFu;
+    *timeout_ms = s_fast_init_timeout_ms ? s_fast_init_timeout_ms : (uint32_t)ms;
+    uint64_t twup_ms = twup / 1000u;
+    *min_reply_ms = twup_ms > FAST_INIT_TICK_SLACK_MS
+                  ? (uint32_t)(twup_ms - FAST_INIT_TICK_SLACK_MS) : 0;
+    return STATUS_NOERROR;
+}
+
 /* vcx_nano.ini: periodic=host forces every periodic onto the host scheduler
  * (bench/debug); default auto uses firmware timers for CAN-family channels. */
 static bool periodic_force_host(void)
@@ -4032,7 +4130,6 @@ static long do_ioctl(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *r
                         dev_log("  J1962_PINS 0x%04lX: this device drives only "
                                 "pin %u for K-line/UART; pin %u needs the "
                                 "routing matrix, whose commit routine is a stub "
-                                "and whose I2C expanders this board lacks "
                                 "(kline_pin=any to forward it anyway)",
                                 (unsigned long)pins, (unsigned)s_uart_pin[ch],
                                 (unsigned)pin1);

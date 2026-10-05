@@ -60,15 +60,16 @@ other Nano variants remain untested.
 ### Honda HDS
 
 **Honda works. HDS compatibility is mostly complete, with some bugs.**
-Testing used a **2011 Honda Civic** and **HDS PC 3.102.051**. A full five-system
-scan covered PGM-FI, SRS, ABS, TPMS and Body Electrical. Live data, K-line/KWP
-communication, and ABS/TPMS fault clearing have worked.
+Testing used a **2011 Honda Civic** and **HDS PC 3.102.051**. Live data and
+K-line/KWP diagnostics work. ABS/TPMS/SRS module communications and routines work
+with continued communication afterward. SRS module comms are slower with the
+occasional "Check DLC Connection" warning (then the requests end up going through)
+but basic functions complete just fine.
 
-The biggest remaining issues are intermittent K-line wake-up failures,
-communication stopping after a clear, and unsupported alternate-pin requests.
-A fix for the post-clear stall is included but still needs a vehicle retest.
-Reconnect if a session stops responding. I suggest avoid using OBD/DLC
-extenders or breakouts; the K-line connection can be electrically finicky.
+All DTC Check can omit SRS; Check the Honda Systems submenu for reading/clearing DTCs.
+Intermittent K-line wake-up failures and unsupported alternate-pin requests remain.
+Avoid OBD/DLC cable extenders or fancy breakout boxes; the K-line connection can be
+electrically finicky.
 
 ## Hardware and pin limits
 
@@ -97,7 +98,7 @@ sustained simultaneous dual-bus use still needs testing.
 
 1. Use **64-bit Windows 10/11** with the CH343 USB serial driver installed.
    Check that the adapter appears under **Device Manager -> Ports (COM & LPT)**.
-2. Extract the **OpenVCX release ZIP** to a local folder such as `C:\OpenVCX`.
+2. Extract the **[OpenVCX release ZIP](https://github.com/erik683/OpenVCX/releases)** to a local folder such as `C:\OpenVCX`.
    It includes both DLLs, matching source and SHA-256 checksums; no compiler is needed.
    **Code -> Download ZIP** contains source only; see [building from source](CONTRIBUTING.md#build).
 3. Close diagnostic applications. Double-click **install.cmd** and accept the

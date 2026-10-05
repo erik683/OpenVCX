@@ -102,7 +102,7 @@ $flags = [ordered]@{
     CAN_PS=1; ISO15765_PS=1; ISO9141_PS=1; ISO14230_PS=1;
     J1850PWM=$experimental; J1850VPW=$experimental;
     J1850PWM_PS=$experimental; J1850VPW_PS=$experimental;
-    HONDA_DIAGH=$experimental; HONDA_DIAGH_PS=$experimental;
+    HONDA_DIAGH=1; HONDA_DIAGH_PS=1;
     UART_ECHO_BYTE_PS=$experimental; TP2_0_PS=$experimental;
     # These two names are custom discovery metadata, not standard API promises.
     J1708=$experimental; LIN=$experimental;

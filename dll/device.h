@@ -23,7 +23,7 @@
 typedef struct rx_msg {
     struct rx_msg *next;
     uint32_t rx_status;
-    uint32_t timestamp; /* host queue tick in milliseconds; API converts to us */
+    uint32_t timestamp; /* host QPC microseconds (low 32 bits) when the serial read returned */
     uint16_t len;
     uint8_t  data[1]; /* allocated to len */
 } rx_msg_t;
@@ -100,6 +100,14 @@ long dev_repeat_stop(uint32_t channel, uint32_t id);
  * a failure, re-enables firmware periodics. Calls require dev_api_lock. */
 long dev_five_baud_begin(uint32_t wire_id, uint32_t *worst_ms);
 void dev_five_baud_end(uint32_t wire_id, bool failed);
+/* Low 32 bits of the host QueryPerformanceCounter clock in microseconds: the
+ * clock rx_msg_t.timestamp is taken from. */
+uint32_t dev_host_us(void);
+/* FAST_INIT reply wait in ms, from the channel's timing (or the ini override),
+ * and the earliest a reply can arrive after the request. Calls require
+ * dev_api_lock. */
+long dev_fast_init_window(uint32_t wire_id, uint16_t pdu_len,
+                          uint32_t *timeout_ms, uint32_t *min_reply_ms);
 
 /* Pop one message; returns NULL when empty (caller frees with free()). */
 rx_msg_t *dev_channel_pop(dev_channel_t *ch);
@@ -137,6 +145,10 @@ void dev_log_stats(const char *when);
  * vendor-tolerated inputs are logged and forwarded.  1 = strict: they return the
  * spec's ERR_* instead.  Threaded into pt_validate_* by api.c and device_vcx.c. */
 bool dev_strict_validation(void);
+
+/* J1962 pin a UART/K-line channel drives (PID_BUS_PIN pin1); 0 for other
+ * engines or an unknown channel. */
+uint8_t dev_channel_uart_pin(uint32_t wire_id);
 
 /* Atomic host RX boundary; generation is optional. No device-side reset. */
 long dev_channel_clear_rx(uint32_t wire_id, uint64_t *generation);

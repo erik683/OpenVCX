@@ -53,18 +53,19 @@ The main additional constraints for client authors are:
   that ignores the error may still transmit on pin 7.
 - **Configuration:** `BS_TX`, `STMIN_TX`, `ISO15765_WFT_MAX` and `W0` are
   accepted/cached without implementing their full requested behavior.
-- **Timing/buffers:** TX indications mean serial submission. Timestamps use the
-  host queue clock. `CLEAR_RX_BUFFER` clears the host queue; `CLEAR_TX_BUFFER`
+- **Timing/buffers:** TX indications mean serial submission. RX timestamps use
+  host QPC arrival estimates. `CLEAR_RX_BUFFER` clears the host queue; `CLEAR_TX_BUFFER`
   is a compatibility no-op.
-- **Honda:** DIAG-H messages on a base ISO9141 periodic channel are rejected.
-  Overlapping repeat/keep-alive behavior needs more vehicle testing.
+- **Host periodic messages:** a due send can race with STOP or channel reuse
+  and submit a message after cancellation.
 - **Optional APIs:** many J2534-2 IOCTLs are unsupported. TP1.6/TP2.0 firmware
   filter setters are stubs. Full J2534 conformance is not claimed.
 
-### Experimental protocol IDs
+### Additional protocol IDs
 
-These need a client that requests them; a successful Connect is not a complete
-vehicle session.
+Honda DIAG-H is registered by default. `install.cmd -ExperimentalProtocols`
+also advertises optional protocols; clients must request their IDs.
+A successful Connect does not establish a vehicle session.
 
 | Protocol | IDs (hex) |
 |---|---|
@@ -82,7 +83,7 @@ controls, not substitutes with identical semantics for standard J2534 settings.
 
 ## Releases
 
-Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\package_release.ps1 -Version 0.1.0`
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\package_release.ps1 -Version 0.2.0`
 with the intended release version. It builds a standalone source snapshot, runs
 both architectures' offline tests/export checks, and writes `dist/OpenVCX-<version>.zip`
 plus its SHA-256. Existing ZIPs are not overwritten.

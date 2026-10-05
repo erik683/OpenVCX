@@ -28,11 +28,12 @@ Replace the port and path with yours. The log folder must exist and be writable.
 | `rx_log_every` | Logs the first 64 frames, then every 256th; 1 includes every frame. |
 | `keep_warm` | 1 keeps the serial connection for handoff between processes; 0 releases it on close. |
 | `repeat_reply_timeout_ms` | 300; range 50..5000. Repeat-message fallback timeout when no reply arrives. |
+| `fast_init_timeout_ms` | Omit to derive the FAST_INIT wait from channel timing. Optional fixed wait: 100..30000 ms. |
 
 For a short bug capture, use `hex_max=0` and `rx_log_every=1`.
 Logs include build identity and may contain VINs and diagnostic/security data;
-redact those before sharing. `TXMSG` means serial submission, and timestamps are
-host queue times, not physical bus measurements.
+redact those before sharing. `TXMSG` means serial submission. J2534 RX timestamps
+use host QPC arrival estimates in microseconds, not physical bus measurements.
 
 Environment overrides: `VCX_NANO_PORT`, `VCX_NANO_LOG`, `VCX_NANO_LOG_LEVEL`,
 `VCX_NANO_LOG_HEXMAX`, `VCX_NANO_LOG_RX_EVERY`.

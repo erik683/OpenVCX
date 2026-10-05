@@ -24,7 +24,7 @@
 #pragma comment(lib, "advapi32.lib")
 #endif
 
-#define DLL_VERSION_STR "0.1.1"
+#define DLL_VERSION_STR "0.2.0"
 #define API_VERSION_STR "04.04"
 #ifndef DLL_BUILD_ID
 #define DLL_BUILD_ID "unfingerprinted"
@@ -175,8 +175,9 @@ static long xfer_err(const char *call)
  * The dump is whole.  It used to stop at 16 bytes with no marker, which is
  * fine for a 22-service poll and actively misleading for anything longer --
  * a multi-frame ISO15765 reply came out looking like a complete short one.
- * ts= is in microseconds, converted from the backend's millisecond host queue
- * clock. It is not a hardware timestamp and has no sub-millisecond precision.
+ * ts= is the low 32 bits of the host QueryPerformanceCounter clock in
+ * microseconds, taken when the serial read carrying the frame returned. It is
+ * a host arrival time, not a hardware timestamp.
  * is_tx selects TxFlags (outgoing) vs
  * RxStatus/Timestamp (incoming) as the second field.
  *
@@ -327,9 +328,13 @@ static bool init_reply_valid(const rx_msg_t *m, bool five_baud)
 }
 
 /* Wait through TX echoes and malformed events, but never extend the deadline.
- * A generation check prevents a disconnected/reused slot supplying the reply. */
+ * A generation check prevents a disconnected/reused slot supplying the reply.
+ * A frame stamped less than min_age_ms after sent_at_us predates the end of the
+ * wake-up pattern, so it cannot answer this init (a late reply to an earlier
+ * request, still in transit when the queue was cleared). */
 static rx_msg_t *wait_uart_init_reply(unsigned long channel, uint64_t generation,
-                                     DWORD timeout, bool five_baud, long *status)
+                                     DWORD timeout, bool five_baud, uint32_t sent_at_us,
+                                     DWORD min_age_ms, long *status)
 {
     DWORD start = GetTickCount();
     bool malformed = false;
@@ -341,6 +346,14 @@ static rx_msg_t *wait_uart_init_reply(unsigned long channel, uint64_t generation
             return NULL;
         }
         bool had_message = m != NULL;
+        if (m && min_age_ms && (int32_t)(m->timestamp - sent_at_us) < (int32_t)(min_age_ms * 1000u) &&
+            init_reply_valid(m, five_baud)) {
+            dev_log("  init RX discarded: len=%u arrived %ld ms after the request, "
+                    "before the wake-up pattern could end (%lu ms)", m->len,
+                    (long)((int32_t)(m->timestamp - sent_at_us) / 1000), (unsigned long)min_age_ms);
+            free(m);
+            m = NULL;
+        }
         if (m) {
             if (init_reply_valid(m, five_baud)) { *status = STATUS_NOERROR; return m; }
             if (!(m->rx_status & (J2534_RX_TX_MSG_TYPE | J2534_RX_TX_INDICATION))) malformed = true;
@@ -549,7 +562,7 @@ long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
             memset(out, 0, sizeof(*out) - sizeof(out->Data));
             out->ProtocolID = snapshot.protocol;
             out->RxStatus = m->rx_status;
-            out->Timestamp = m->timestamp * 1000u;
+            out->Timestamp = m->timestamp;
             out->DataSize = m->len;
             out->ExtraDataIndex = (m->rx_status & (J2534_RX_TX_INDICATION |
                                    J2534_RX_START_OF_MESSAGE)) ? 0 : m->len;
@@ -712,7 +725,18 @@ static long api_PassThruStartPeriodicMsg(unsigned long ChannelID,
         return set_err(ERR_INVALID_CHANNEL_ID,
                        "PassThruStartPeriodicMsg: bad channel");
     }
-    if (pMsg->ProtocolID != pch->protocol)
+    /* HDS's SRS keepalive starts a HONDA_DIAGH_PS (0x800B) message on the ISO9141
+     * channel it opened for the same ECU.  Both run on firmware engine 0x9104,
+     * so in vendor-compatible mode accept exactly that pair when the channel
+     * already drives pin 7 (HONDA_DIAGH's K-line); strict mode still rejects. */
+    bool honda_alias = !dev_strict_validation() &&
+                       pMsg->ProtocolID == J2534_2_HONDA_DIAGH_PS &&
+                       pch->protocol == J2534_ISO9141 &&
+                       dev_channel_uart_pin(pch->wire_id) == 7;
+    if (honda_alias)
+        dev_log("PassThruStartPeriodicMsg: accepting HONDA_DIAGH_PS message on "
+                "ISO9141 channel (same engine, pin 7)");
+    else if (pMsg->ProtocolID != pch->protocol)
         return set_err(ERR_MSG_PROTOCOL_ID, "PassThruStartPeriodicMsg: protocol mismatch "
                        "(msg=%lu channel=%lu)", pMsg->ProtocolID, (unsigned long)pch->protocol);
     long mv = pt_validate_msg(pch->protocol, PT_OP_PERIODIC, pMsg->DataSize,
@@ -1041,7 +1065,8 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
         dev_log("  FIVE_BAUD_INIT: waiting up to %lu ms (firmware worst case %lu ms)",
                 (unsigned long)timeout, (unsigned long)worst_ms);
         long init_status;
-        rx_msg_t *m = wait_uart_init_reply(ChannelID, generation, timeout, true, &init_status);
+        rx_msg_t *m = wait_uart_init_reply(ChannelID, generation, timeout, true, 0, 0,
+                                           &init_status);
         if (!m) {
             dev_five_baud_end(ChannelID, true);
             return set_err(init_status, "FIVE_BAUD_INIT: no valid sync/key-byte record");
@@ -1080,21 +1105,32 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
               proto == J2534_2_ISO9141_PS || proto == J2534_2_ISO14230_PS ||
               proto == J2534_2_HONDA_DIAGH_PS))
             return set_err(ERR_NOT_SUPPORTED, "FAST_INIT: protocol %lu", proto);
+        uint16_t pdu_len = input ? (uint16_t)input->DataSize : 0;
+        uint32_t wait_ms, min_reply_ms;
+        long win = dev_fast_init_window(ChannelID, pdu_len, &wait_ms, &min_reply_ms);
+        if (win != STATUS_NOERROR) return set_err(win, "FAST_INIT: bad channel");
+#ifdef VCX_INIT_TEST
+        wait_ms = PT_INIT_TIMEOUT_MS;  /* the harnesses keep their short fixed wait */
+#endif
         uint64_t generation;
         long clear_rc = dev_channel_clear_rx(ChannelID, &generation);
         if (clear_rc != STATUS_NOERROR) return set_err(clear_rc, "init: channel closed");
-        long rc = send_uart_init(ChannelID, 0x04, input ? input->Data : NULL,
-                                 input ? (uint16_t)input->DataSize : 0);
+        uint32_t sent_at_us = dev_host_us();
+        long rc = send_uart_init(ChannelID, 0x04, input ? input->Data : NULL, pdu_len);
         if (rc < 0) return xfer_err("FAST_INIT");
         if (rc != STATUS_NOERROR) return set_err(rc, "FAST_INIT: device returned %ld", rc);
         if (!output) return STATUS_NOERROR;
+        dev_log("  FAST_INIT: waiting up to %lu ms (no reply possible before %lu ms)",
+                (unsigned long)wait_ms, (unsigned long)min_reply_ms);
         long init_status;
-        rx_msg_t *m = wait_uart_init_reply(ChannelID, generation, PT_INIT_TIMEOUT_MS, false, &init_status);
-        if (!m) return set_err(init_status, "FAST_INIT: no valid response");
+        rx_msg_t *m = wait_uart_init_reply(ChannelID, generation, wait_ms, false, sent_at_us,
+                                           min_reply_ms, &init_status);
+        if (!m) return set_err(init_status, "FAST_INIT: no valid response in %lu ms",
+                               (unsigned long)wait_ms);
         memset(output, 0, sizeof(*output));
         output->ProtocolID = proto;
         output->RxStatus = m->rx_status;
-        output->Timestamp = m->timestamp * 1000u;
+        output->Timestamp = m->timestamp;
         output->DataSize = m->len;
         output->ExtraDataIndex = m->len;   /* no extra bytes: index == DataSize per J2534 */
         memcpy(output->Data, m->data, m->len);
