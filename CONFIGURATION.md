@@ -29,6 +29,7 @@ Replace the port and path with yours. The log folder must exist and be writable.
 | `keep_warm` | 1 keeps the serial connection for handoff between processes; 0 releases it on close. |
 | `repeat_reply_timeout_ms` | 300; range 50..5000. Repeat-message fallback timeout when no reply arrives. |
 | `fast_init_timeout_ms` | Omit to derive the FAST_INIT wait from channel timing. Optional fixed wait: 100..30000 ms. |
+| `kline_periodic` | `host`; the DLL schedules ISO9141-engine periodic messages. `idle` or `fixed` moves them to firmware timers (`idle` fires after the interval of line silence, `fixed` at a fixed interval) for comparison. |
 
 For a short bug capture, use `hex_max=0` and `rx_log_every=1`.
 Logs include build identity and may contain VINs and diagnostic/security data;

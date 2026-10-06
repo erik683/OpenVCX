@@ -494,6 +494,7 @@ typedef struct {
     uint8_t data[12];
     bool fw;                 /* true: firmware timer slot; false: host scheduler */
     uint8_t fw_slot;         /* device timer slot when fw */
+    bool parked;             /* fw slot kept but stopped while J1962_PINS is refused */
 } periodic_t;
 static CRITICAL_SECTION s_per;
 static periodic_t s_periodic[DEV_MAX_PERIODIC];
@@ -541,6 +542,18 @@ static DWORD s_repeat_reply_timeout_ms = REPEAT_REPLY_TIMEOUT_MS;
 /* vcx_nano.ini fast_init_timeout_ms: a fixed FAST_INIT wait; 0 derives it from
  * the channel's timing (dev_fast_init_window). */
 static DWORD s_fast_init_timeout_ms;
+/* vcx_nano.ini kline_periodic: where ISO9141-engine keep-alives run; see
+ * fw_periodic_flag(). */
+typedef enum { KLINE_PER_IDLE = 0, KLINE_PER_FIXED, KLINE_PER_HOST } kline_per_mode_t;
+/* Normal default is the host scheduler (J2534 fixed-interval semantics): the
+ * October 5 HDS comparison did not show a firmware mode improving SRS
+ * reliability. */
+#ifdef VCX_MINIMAL_PROFILE
+#define KLINE_PER_DEFAULT KLINE_PER_FIXED
+#else
+#define KLINE_PER_DEFAULT KLINE_PER_HOST
+#endif
+static kline_per_mode_t s_kline_periodic = KLINE_PER_DEFAULT;
 static DWORD WINAPI periodic_proc(LPVOID arg);
 
 #ifdef VCX_REPEAT_TEST
@@ -843,6 +856,11 @@ void dev_init(HINSTANCE dll_module)
     s_fast_init_timeout_ms = 0;
     if (ini_get("fast_init_timeout_ms", v, sizeof(v)))
         s_fast_init_timeout_ms = (DWORD)atoi(v);
+    s_kline_periodic = KLINE_PER_DEFAULT;
+    if (ini_get("kline_periodic", v, sizeof(v)))
+        s_kline_periodic = !_stricmp(v, "host")  ? KLINE_PER_HOST :
+                           !_stricmp(v, "fixed") ? KLINE_PER_FIXED :
+                           !_stricmp(v, "idle")  ? KLINE_PER_IDLE  : KLINE_PER_DEFAULT;
 #ifdef VCX_RESEARCH_CONFIG
     /* Session pre-refresh age in ms (0 = reactive-only; install once, then let
      * OPEN's 0xFE retry reinstall on demand).  Default preserves the historical
@@ -909,9 +927,12 @@ void dev_init(HINSTANCE dll_module)
     }
 
 #endif
-    dev_log("configuration: validation=%s voltage=%d refresh_ms=%lu keep_warm=%d; restart host to reload",
+    dev_log("configuration: validation=%s voltage=%d refresh_ms=%lu keep_warm=%d "
+            "kline_periodic=%s; restart host to reload",
             s_strict_validation ? "strict" : "HDS-compatible", (int)s_prog_policy,
-            (unsigned long)s_license_refresh_ms, keep_warm_enabled());
+            (unsigned long)s_license_refresh_ms, keep_warm_enabled(),
+            s_kline_periodic == KLINE_PER_HOST ? "host" :
+            s_kline_periodic == KLINE_PER_FIXED ? "fixed" : "idle");
     for (unsigned i = 0; i < sizeof(s_ini)/sizeof(s_ini[0]); ++i) {
         if (s_ini[i].invalid) dev_log("configuration: invalid %s; using compiled default", s_ini[i].key);
         else dev_log("configuration: %s=%s", s_ini[i].key,
@@ -2427,7 +2448,11 @@ void dev_disconnect(void)
 static bool keep_warm_enabled(void)
 {
     char v[8];
+#ifdef VCX_MINIMAL_PROFILE
+    if (!ini_get("keep_warm", v, sizeof(v))) return false;  /* stock: close releases the port */
+#else
     if (!ini_get("keep_warm", v, sizeof(v))) return true;   /* default: warm */
+#endif
     return strcmp(v, "0") && _stricmp(v, "off") && _stricmp(v, "false") && _stricmp(v, "lenient");
 }
 
@@ -2503,6 +2528,17 @@ static bool     s_pins_set[DEV_MAX_CHANNELS];
  * Seeded at connect by uart_pin_default() because the firmware's UART engines
  * default this field to 0, not 7. */
 static uint8_t  s_uart_pin[DEV_MAX_CHANNELS];
+/* The application asked this UART channel for a pin it cannot have (J1962_PINS
+ * refused below: 14/1/15 for HDS's HONDA_DIAGH_PS and ISO9141_PS probes).  The
+ * channel stays open on the claimed pin, as before, but sends nothing: the
+ * application addressed a different wire.  A genuine Nano behaves the same way
+ * from the bus's point of view -- the vendor DLL forwards the pin, the firmware
+ * routes it into the stubbed matrix and never claims pin 7 (uart_hw_set_pin
+ * 0x0801C890), so no bytes reach the K-line.  Without this the DLL put HDS's
+ * 9600-baud DIAG-H probes on pin 7 shortly before every All DTC Check SRS
+ * wake-up (live Honda sessions, 2026-10-02..04).  Cleared by a later accepted
+ * request for the claimed pin, and at connect. */
+static bool     s_uart_pin_refused[DEV_MAX_CHANNELS];
 
 uint8_t dev_channel_uart_pin(uint32_t wire_id)
 {
@@ -2767,9 +2803,13 @@ static bool kline_pin_override(uint8_t *pin, bool *any)
  * pin to pass back. */
 static bool kline_pin_any(void)
 {
+#ifdef VCX_MINIMAL_PROFILE
+    return true;   /* vendor DLL: forward J1962_PINS to the UART engine unchecked */
+#else
     uint8_t pin = 0; bool any = false;
     kline_pin_override(&pin, &any);
     return any;
+#endif
 }
 
 static uint8_t uart_pin_default(void)
@@ -2886,6 +2926,7 @@ static long do_connect(const uint8_t *p, uint8_t *resp, uint16_t *rl, uint16_t c
     uint8_t par[24]; int par_n = 0;
     par_emit(par, &par_n, sizeof(par), VCX_PID_BAUDRATE, baud);
     s_uart_pin[chan] = 0;
+    s_uart_pin_refused[chan] = false;
     if (engine_is_kline(engine)) {
         /* Claim the K-line pin explicitly -- the engine object's pin field is
          * zero out of its constructor, and pin 0 routes to the dead matrix
@@ -3009,6 +3050,20 @@ static long do_write(const uint8_t *p, uint16_t plen)
         confirm[nconfirm].data = data;
         confirm[nconfirm].len = 4;
         nconfirm++;
+    }
+
+    if (engine_is_kline(engine) && s_uart_pin_refused[chan]) {
+        dev_log_hex(data, dsize, "  tx ch=%u suppressed (txflags=0x%08lX): the "
+                    "application selected a J1962 pin this device cannot drive",
+                    chan, (unsigned long)txflags);
+        /* The write reports success, so queue its confirmations as usual. */
+        EnterCriticalSection(&s_chan);
+        dev_channel_t *c = chan_find_locked(wire_id);
+        for (int i = 0; c && i < nconfirm; i++)
+            chan_push_locked(c, confirm[i].rx_status, confirm[i].data,
+                             confirm[i].len, dev_host_us());
+        LeaveCriticalSection(&s_chan);
+        return STATUS_NOERROR;
     }
 
     long rc = vcx_send_msg(chan, body, n, confirm, nconfirm);
@@ -3183,10 +3238,12 @@ static long do_clear_filters(uint32_t wire_id)
  * slot; op 0x49 value 02 clears every slot on the channel.
  *
  * Used for the two engines the capture actually proved -- CAN (0x8101) and
- * ISO15765 (0x8001).  Everything else (K-line/J1850, the J1939 and TP2.0
- * engines that engine_is_can() also matches, a message carrying TxFlags this
- * record has no field for, or the ini override) falls back to the host
- * scheduler below.  Moving the proven cases onto the device removes the host
+ * ISO15765 (0x8001) -- and, since 2026-10-05, the ISO9141 engine's K-line
+ * keep-alives (see kline_periodic below).  Everything else (ISO14230 and the
+ * other UART engines, J1850, the J1939 and TP2.0 engines that engine_is_can()
+ * also matches, a message carrying TxFlags this record has no field for, or the
+ * ini override) falls back to the host scheduler below.  Moving the proven
+ * cases onto the device removes the host
  * scheduler's ~1 ms jitter and its dependence on Windows timer resolution.
  *
  * Record flag 0x80 makes ptimer_list_tx decode buffer[0..3] as big-endian
@@ -3198,26 +3255,66 @@ static long do_clear_filters(uint32_t wire_id)
  * these four PDU TX-flag bytes. */
 #define VCX_FW_PERIODIC_TXFLAGS_OK 0u   /* only zero TX flags validated here */
 
-static bool fw_periodic_eligible(uint16_t engine, uint32_t txflags, uint16_t len)
+/* Record flag bytes.  Bit 0 = free-running, bit 3 = fire once at enable (timer
+ * type 0x19: 0x0801A10C sets the first deadline to "now"), bit 6 = deliver every
+ * received frame (no rx_msg match), bit 7 = buffer[0..3] are BE32 PDU TX flags.
+ * 0xC9 is the vendor-captured CAN record.  0xC8 differs only in bit 0: the slot
+ * is re-armed by every successful write or read on the channel
+ * (ptimer_list_reset 0x0801927E, ptimer_list_filter 0x08019212), so it fires
+ * after `interval` of line silence -- an idle keep-alive that stays quiet while
+ * requests and replies are flowing.  Without bit 0 a failed send pauses the
+ * channel's whole periodic service (ptimer_list_tx 0x0801913A) until the next
+ * add/enable. */
+#define VCX_FW_PERIODIC_FLAG_FIXED 0xC9u
+#define VCX_FW_PERIODIC_FLAG_IDLE  0xC8u
+
+/* K-line keep-alives (vcx_nano.ini kline_periodic):
+ *   idle            firmware timer, flag 0xC8, fires after `interval` of silence
+ *   fixed           firmware timer, flag 0xC9, fixed interval like the CAN record
+ *                   (minimal-profile default)
+ *   host  (default) host scheduler (normal-profile default since 2026-10-06)
+ * Applies to the ISO9141 engine (0x9104: ISO9141, ISO9141_PS, HONDA_DIAGH_PS),
+ * whose write slot iso9141_write (0x08032858) takes the same {flags, len, data}
+ * descriptor from ptimer_list_tx as from a host TXMSG, and runs synchronously in
+ * the protocol worker, so a keep-alive can never start while that worker is
+ * still transmitting or inside P3_MIN of the last bus byte. */
+/* kline_per_mode_t / s_kline_periodic are declared with the other startup
+ * configuration near s_fast_init_timeout_ms. */
+
+/* The only TX flags a firmware K-line record may carry: the firmware UART write
+ * acts on bit 2 (fast init), bit 3 (five-baud) and bit 18 (skip P3_MIN), none of
+ * which a periodic may request.  WAIT_P3_MIN_ONLY (bit 9, set by HDS on every
+ * Honda K-line message) is passed through exactly as do_write passes it. */
+#define VCX_FW_KLINE_TXFLAGS_OK J2534_TX_WAIT_P3_MIN_ONLY
+
+/* 0 = host scheduler; otherwise the record flag byte to use. */
+static uint8_t fw_periodic_flag(uint16_t engine, uint32_t txflags, uint16_t len)
 {
-    if (engine != 0x8001 && engine != 0x8101) return false;
-    if (txflags & ~VCX_FW_PERIODIC_TXFLAGS_OK) return false;
-    return (4u + (uint32_t)len) <= 16u;
+    if ((4u + (uint32_t)len) > 16u) return 0;
+    if (engine == 0x8001 || engine == 0x8101)
+        return (txflags & ~VCX_FW_PERIODIC_TXFLAGS_OK) ? 0 : VCX_FW_PERIODIC_FLAG_FIXED;
+    if (engine == 0x9104 && s_kline_periodic != KLINE_PER_HOST &&
+        !(txflags & ~VCX_FW_KLINE_TXFLAGS_OK))
+        return s_kline_periodic == KLINE_PER_FIXED ? VCX_FW_PERIODIC_FLAG_FIXED
+                                                   : VCX_FW_PERIODIC_FLAG_IDLE;
+    return 0;
 }
 
 static long fw_periodic_add(uint8_t chan, uint8_t slot, uint32_t interval_ms,
+                            uint8_t flag, uint32_t txflags,
                             const uint8_t *data, uint16_t dsize)
 {
     uint8_t f[5 + 4 + 4 + 12]; int n = 0;
     uint32_t us = interval_ms * 1000u;
     f[n++] = 0x01;              /* one record */
     f[n++] = slot;
-    f[n++] = 0xC9;              /* flags, per capture */
+    f[n++] = flag;              /* VCX_FW_PERIODIC_FLAG_* */
     f[n++] = (uint8_t)(4 + dsize);   /* buffer length: TX flags + Data */
     f[n++] = 0x00;              /* match length */
     f[n++] = (uint8_t)us; f[n++] = (uint8_t)(us >> 8);
     f[n++] = (uint8_t)(us >> 16); f[n++] = (uint8_t)(us >> 24);
-    f[n++] = 0; f[n++] = 0; f[n++] = 0; f[n++] = 0;   /* BE32 PDU TX flags */
+    f[n++] = (uint8_t)(txflags >> 24); f[n++] = (uint8_t)(txflags >> 16);
+    f[n++] = (uint8_t)(txflags >> 8);  f[n++] = (uint8_t)txflags;   /* BE32 PDU TX flags */
     memcpy(&f[n], data, dsize); n += dsize;
     long st = vcx_xact(0x00, VCX_OP_PERIODIC_ADD, chan, f, (uint16_t)n, NULL, NULL, 0);
     if (st < 0) return -1;
@@ -3235,6 +3332,33 @@ static long fw_periodic_stop(uint8_t chan, uint8_t slot)
     uint8_t f[9] = { 0x01, slot, 0, 0, 0, 0, 0, 0, 0 };
     long st = vcx_xact(0x00, VCX_OP_PERIODIC_ADD, chan, f, sizeof(f), NULL, NULL, 0);
     return st == VCX_STATUS_OK ? STATUS_NOERROR : st < 0 ? -1 : ERR_FAILED;
+}
+
+/* Re-add the firmware keep-alives parked on a J1962_PINS refusal, in their
+ * reserved slots, once the refusal is lifted. */
+static long fw_periodic_unpark(uint8_t chan)
+{
+    uint16_t engine = proto_to_engine(chan_protocol((uint32_t)chan + 1));
+    for (int k = 0; k < DEV_MAX_PERIODIC; k++) {
+        EnterCriticalSection(&s_per);
+        periodic_t e = s_periodic[k];
+        LeaveCriticalSection(&s_per);
+        if (!e.in_use || !e.fw || !e.parked || e.chan != chan) continue;
+        /* ADD/ENABLE may apply before a lost reply. Until a stop succeeds,
+         * this slot must be treated as potentially transmitting. */
+        EnterCriticalSection(&s_per);
+        s_periodic[k].parked = false;
+        LeaveCriticalSection(&s_per);
+        long st = fw_periodic_add(chan, e.fw_slot, e.interval,
+                                  fw_periodic_flag(engine, e.txflags, e.len),
+                                  e.txflags, e.data, e.len);
+        if (st != STATUS_NOERROR) {
+            dev_log("  ch=%u: restarting firmware keep-alive id=%lu failed (%ld)",
+                    (unsigned)chan, (unsigned long)e.id, st);
+            return st;
+        }
+    }
+    return STATUS_NOERROR;
 }
 
 /* Five-baud (slow) init support. Power-on slow-init defaults per engine (us),
@@ -3330,6 +3454,9 @@ void dev_five_baud_end(uint32_t wire_id, bool failed)
             dev_log("  five-baud: restoring the fast-init idle failed");
         s_five_baud_restore_us[ch] = 0;
     }
+#ifdef VCX_MINIMAL_PROFILE
+    failed = false;   /* stock: firmware timers stay as the firmware left them */
+#endif
     if (failed) {
         uint8_t en = 0x01;
         for (int c = 0; c < DEV_MAX_CHANNELS; c++) {
@@ -3386,6 +3513,12 @@ long dev_fast_init_window(uint32_t wire_id, uint16_t pdu_len,
     uint64_t twup_ms = twup / 1000u;
     *min_reply_ms = twup_ms > FAST_INIT_TICK_SLACK_MS
                   ? (uint32_t)(twup_ms - FAST_INIT_TICK_SLACK_MS) : 0;
+#ifdef VCX_MINIMAL_PROFILE
+    /* Vendor timing: VCXPT32 gives up 500 ms after the IOCTL starts and takes
+     * the first frame it sees. */
+    *timeout_ms = s_fast_init_timeout_ms ? s_fast_init_timeout_ms : FAST_INIT_FLOOR_MS;
+    *min_reply_ms = 0;
+#endif
     return STATUS_NOERROR;
 }
 
@@ -3673,11 +3806,14 @@ static long do_start_periodic(const uint8_t *p, uint16_t plen,
 
     uint8_t chan = (uint8_t)(wire_id - 1);
     /* Firmware timers only where the capture proved the record, and only for a
-     * message the record can carry losslessly -- see fw_periodic_eligible().
+     * message the record can carry losslessly -- see fw_periodic_flag().
      * Everything else uses the host scheduler, which is slower but complete. */
     uint16_t per_engine = proto_to_engine(chan_protocol(wire_id));
-    bool use_fw = !periodic_force_host() &&
-                  fw_periodic_eligible(per_engine, txflags, len);
+    uint8_t fw_flag = periodic_force_host() ? 0 : fw_periodic_flag(per_engine, txflags, len);
+    /* The firmware would transmit on the claimed pin; the host path reaches
+     * do_write, which suppresses it. */
+    if (engine_is_kline(per_engine) && s_uart_pin_refused[chan]) fw_flag = 0;
+    bool use_fw = fw_flag != 0;
     if (!use_fw && !periodic_force_host() && engine_is_can(per_engine) &&
         dev_log_enabled())
         dev_log("periodic ch=%u on host scheduler (engine=%04X txflags=0x%08lX "
@@ -3713,7 +3849,9 @@ static long do_start_periodic(const uint8_t *p, uint16_t plen,
     if (rc != STATUS_NOERROR) return rc;
 
     if (use_fw) {
-        long st = fw_periodic_add(chan, (uint8_t)fwslot, interval, fw_data, fw_len);
+        long st = fw_periodic_add(chan, (uint8_t)fwslot, interval, fw_flag,
+                                  engine_is_kline(per_engine) ? txflags : 0,
+                                  fw_data, fw_len);
         if (st != STATUS_NOERROR) {
             /* ADD or ENABLE may have applied before a lost reply. Keep the
              * reservation if rollback also fails, so CLEAR/Close can retry. */
@@ -3728,12 +3866,15 @@ static long do_start_periodic(const uint8_t *p, uint16_t plen,
             return st;
         }
         if (dev_log_enabled())
-            dev_log("periodic id=%lu -> firmware timer ch=%u slot=%d interval=%lums",
-                    (unsigned long)new_id, chan, fwslot, (unsigned long)interval);
+            dev_log("periodic id=%lu -> firmware timer ch=%u slot=%d interval=%lums "
+                    "flag=%02X%s", (unsigned long)new_id, chan, fwslot,
+                    (unsigned long)interval, fw_flag,
+                    fw_flag == VCX_FW_PERIODIC_FLAG_IDLE ? " (idle keep-alive)" : "");
         return STATUS_NOERROR;
     }
 
-    /* Host scheduler path (K-line/J1850, or forced). */
+    /* Host scheduler path (other UART engines, J1850, kline_periodic=host, or
+     * forced). */
     if (!s_periodic_thread) {
         InterlockedExchange(&s_periodic_run, 1);
         s_periodic_thread = CreateThread(NULL, 0, periodic_proc, NULL, 0, NULL);
@@ -4059,6 +4200,8 @@ static long do_ioctl(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *r
         uint32_t saved_pins = s_pins[ch];
         bool saved_pins_set = s_pins_set[ch];
         uint8_t saved_uart_pin = s_uart_pin[ch];
+        bool saved_uart_pin_refused = s_uart_pin_refused[ch];
+        bool uart_pin_refused = false;
         long result = STATUS_NOERROR;
         bool device_uncertain = false;
         uint8_t blob[6 * 84]; int bn = 0;
@@ -4133,6 +4276,7 @@ static long do_ioctl(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *r
                                 "(kline_pin=any to forward it anyway)",
                                 (unsigned long)pins, (unsigned)s_uart_pin[ch],
                                 (unsigned)pin1);
+                        uart_pin_refused = true;
                         result = ERR_NOT_SUPPORTED; goto config_failed;
                     }
                     /* s_pins[]/s_pins_set[] are the CAN pin-change cache below;
@@ -4154,6 +4298,9 @@ static long do_ioctl(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *r
                                 "(K-line, hardwired)", (unsigned long)pins,
                                 (unsigned)s_uart_pin[ch]);
                     }
+                    /* An explicit, accepted pin lifts an earlier refusal; a
+                     * zero word selects nothing and leaves it as it was. */
+                    if (pins != 0) s_uart_pin_refused[ch] = false;
                     continue;
                 }
                 if (!engine_is_can(pin_engine)) { result = ERR_NOT_SUPPORTED; goto config_failed; }
@@ -4265,6 +4412,15 @@ static long do_ioctl(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *r
             if (st < 0) { result = -1; goto config_failed; }
             if (st != VCX_STATUS_OK) { result = ERR_FAILED; goto config_failed; }
         }
+        if (saved_uart_pin_refused && !s_uart_pin_refused[ch]) {
+            result = fw_periodic_unpark((uint8_t)ch);
+            if (result != STATUS_NOERROR) {
+                /* Restore suppression and stop all resumed or uncertain slots.
+                 * Failed stops remain unparked so later cleanup retries them. */
+                uart_pin_refused = true;
+                goto config_failed;
+            }
+        }
         return STATUS_NOERROR;
 config_failed:
         /* 0x45 can partially apply before an error/timeout. Retire the channel
@@ -4285,6 +4441,31 @@ config_failed:
         s_pins[ch] = saved_pins;
         s_pins_set[ch] = saved_pins_set;
         s_uart_pin[ch] = saved_uart_pin;
+        s_uart_pin_refused[ch] = saved_uart_pin_refused;
+        if (uart_pin_refused && dev_channel_find(wire)) {
+            s_uart_pin_refused[ch] = true;
+            /* A firmware keep-alive started earlier would keep transmitting on
+             * the claimed pin.  Stop it but keep its id and slot: it is re-added
+             * when the refusal is lifted (fw_periodic_unpark). */
+            for (int k = 0; k < DEV_MAX_PERIODIC; k++) {
+                EnterCriticalSection(&s_per);
+                periodic_t e = s_periodic[k];
+                LeaveCriticalSection(&s_per);
+                if (!e.in_use || !e.fw || e.parked || e.chan != ch) continue;
+                if (fw_periodic_stop(e.chan, e.fw_slot) != STATUS_NOERROR) {
+                    dev_log("  ch=%u: stopping firmware keep-alive id=%lu failed; it "
+                            "may still transmit", (unsigned)ch, (unsigned long)e.id);
+                    continue;
+                }
+                EnterCriticalSection(&s_per);
+                s_periodic[k].parked = true;
+                LeaveCriticalSection(&s_per);
+            }
+            dev_log("  ch=%u: K-line transmissions suppressed until J1962_PINS "
+                    "selects pin %u (the refused wire is unreachable; a stock "
+                    "Nano sends nothing here either)", (unsigned)ch,
+                    (unsigned)s_uart_pin[ch]);
+        }
         return result;
     }
     default:

@@ -70,6 +70,21 @@ static void fast_window_tests(void)
     /* Power-on defaults, no data rate cached: TIDLE 300 ms dominates the
      * pre-wait, TWUP 50 ms, 1200-baud byte time floor. */
     s_cfg_n[0] = 0;
+#ifdef VCX_MINIMAL_PROFILE
+    /* Minimal: the vendor's fixed 500 ms, first frame accepted, any timing;
+     * fast_init_timeout_ms still overrides. */
+    CHECK(dev_fast_init_window(1, 4, &wait, &early) == 0);
+    CHECK(wait == 500 && early == 0);
+    cfg_set(0, J2534_CFG_TWUP, 5000);
+    CHECK(dev_fast_init_window(1, 4, &wait, &early) == 0);
+    CHECK(wait == 500 && early == 0);
+    s_fast_init_timeout_ms = 1500;
+    CHECK(dev_fast_init_window(1, 4, &wait, &early) == 0);
+    CHECK(wait == 1500 && early == 0);
+    s_fast_init_timeout_ms = 0;
+    s_cfg_n[0] = 0;
+    return;
+#endif
     CHECK(dev_fast_init_window(1, 4, &wait, &early) == 0);
     CHECK(wait == 798 && early == 18);
     /* HDS's Honda K-line timing (2011 Civic ABS/TPMS): 80+210+4*(0.961+2)+
@@ -138,6 +153,7 @@ int main(void)
     CHECK(PassThruIoctl(1, J2534_IOCTL_FAST_INIT, &request, &response) == 0);
     CHECK(response.DataSize == sizeof(fast) && memcmp(response.Data, fast, sizeof(fast)) == 0);
     CHECK(response.Timestamp == fast_stamp);
+#ifndef VCX_MINIMAL_PROFILE
     /* A frame that predates the end of the wake-up pattern is skipped... */
     scenario = 6; fast_stamp = dev_host_us() + 1000000;
     memset(&response, 0, sizeof(response));
@@ -146,6 +162,13 @@ int main(void)
     /* ...and on its own is a timeout, not a reply or a malformed one. */
     scenario = 7;
     CHECK(PassThruIoctl(1, J2534_IOCTL_FAST_INIT, &request, &response) == ERR_TIMEOUT);
+#else
+    /* Minimal takes the first frame, early or not, as the vendor DLL does. */
+    scenario = 6; fast_stamp = dev_host_us() + 1000000;
+    memset(&response, 0, sizeof(response));
+    CHECK(PassThruIoctl(1, J2534_IOCTL_FAST_INIT, &request, &response) == 0);
+    CHECK(response.DataSize == sizeof(fast));
+#endif
     fast_window_tests();
     scenario = 5;
     out.NumOfBytes = sizeof(keys);

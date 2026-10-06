@@ -38,13 +38,19 @@
 #endif
 #if defined(_MSC_FULL_VER)
 #define DLL_BUILD_TOOLCHAIN "msvc " DLL_STR(_MSC_FULL_VER) " " DLL_ARCH_STR
+#elif defined(__clang__)
+#define DLL_BUILD_TOOLCHAIN "clang " __clang_version__ " " DLL_ARCH_STR
 #elif defined(__GNUC__)
 #define DLL_BUILD_TOOLCHAIN "gcc " __VERSION__ " " DLL_ARCH_STR
 #else
 #define DLL_BUILD_TOOLCHAIN "unknown " DLL_ARCH_STR
 #endif
-#ifdef VCX_RESEARCH_CONFIG
+#if defined(VCX_RESEARCH_CONFIG) && defined(VCX_MINIMAL_PROFILE)
+#error "-ResearchConfig and -Minimal are separate builds"
+#elif defined(VCX_RESEARCH_CONFIG)
 #define DLL_CONFIG_STR "research"
+#elif defined(VCX_MINIMAL_PROFILE)
+#define DLL_CONFIG_STR "minimal"
 #else
 #define DLL_CONFIG_STR "release"
 #endif
@@ -980,6 +986,12 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
     case 0x8005: /* QUERY_REPEAT_MESSAGE */
     case 0x8006: { /* STOP_REPEAT_MESSAGE */
         log_repeat_ioctl(ChannelID, IoctlID, pInput, pOutput);
+#ifdef VCX_MINIMAL_PROFILE
+        /* Stock status: the vendor DLL does not implement Honda's repeat
+         * IOCTLs, and HDS's capability probe reads 15 as "unsupported". */
+        return set_err(ERR_INVALID_IOCTL_ID, "repeat IOCTL 0x%04lX: not in the "
+                       "minimal profile", IoctlID);
+#else
         long rc;
         uint32_t id = 0, active = 0;
         SIZE_T copied = 0;
@@ -1028,6 +1040,7 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
         dev_log("repeat result ch=%lu ioctl=0x%04lX id=%lu active=%lu rc=%ld",
                 ChannelID, IoctlID, (unsigned long)id, (unsigned long)active, rc);
         return rc == STATUS_NOERROR ? rc : set_err(rc, "PassThruIoctl: repeat ioctl 0x%04lX failed (%ld)", IoctlID, rc);
+#endif
     }
     case J2534_IOCTL_FIVE_BAUD_INIT: {
         SBYTE_ARRAY *input = pInput, *output = pOutput;
@@ -1072,6 +1085,7 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
             return set_err(init_status, "FIVE_BAUD_INIT: no valid sync/key-byte record");
         }
         unsigned baud = (unsigned)(m->data[3] << 8 | m->data[4]);
+#ifndef VCX_MINIMAL_PROFILE
         if (baud < PT_FIVE_BAUD_MIN_BAUD || baud > PT_FIVE_BAUD_MAX_BAUD) {
             /* The firmware never checks the sync byte; a bogus measurement
              * means the key bytes cannot be trusted either. */
@@ -1079,6 +1093,7 @@ static long api_PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
             dev_five_baud_end(ChannelID, true);
             return set_err(ERR_FAILED, "FIVE_BAUD_INIT: implausible sync baud %u", baud);
         }
+#endif
         dev_five_baud_end(ChannelID, false);
         dev_log("  FIVE_BAUD_INIT ok: key bytes %02X %02X, measured sync baud %u",
                 m->data[1], m->data[2], baud);

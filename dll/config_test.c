@@ -141,8 +141,17 @@ int main(void)
     for (int i = 0; i < param_len; i += 6) CHECK(!(params[i] == 4 && params[i+1] == 0));
     channel(J2534_ISO9141);
     const uint32_t rejected[] = {J2534_CFG_P3_MIN, 99, J2534_2_CFG_J1962_PINS, 0x0F00};
+#ifndef VCX_MINIMAL_PROFILE
     CHECK(set(rejected, 2) == ERR_NOT_SUPPORTED);
     CHECK(cfg_get(0, J2534_CFG_P3_MIN) == 0); CHECK(calls == 0);
+    CHECK(s_uart_pin_refused[0] && s_uart_pin[0] == 7);
+#else
+    /* Minimal forwards the pin the way the vendor DLL does: pin1 = 15 reaches
+     * the engine (whose firmware routes it into the stubbed matrix). */
+    CHECK(set(rejected, 2) == 0);
+    CHECK(s_uart_pin[0] == 15 && !s_uart_pin_refused[0]);
+    s_uart_pin[0] = 7; channel(J2534_ISO9141);
+#endif
     const uint32_t timing[] = {J2534_CFG_P3_MIN, 25};
     CHECK(set(timing, 1) == 0);
     const uint8_t us[] = {0,0x43,0,0,0x61,0xA8};
@@ -237,6 +246,9 @@ int main(void)
     CHECK(!ini_valid("license_refresh_ms", "240000junk"));
     CHECK(!ini_valid("can_bus", "garbage"));
     CHECK(!ini_valid("kline_pin", "257"));
+    CHECK(ini_valid("kline_periodic", "idle") && ini_valid("kline_periodic", "FIXED") &&
+          ini_valid("kline_periodic", "host"));
+    CHECK(!ini_valid("kline_periodic", "auto") && !ini_valid("kline_periodic", "idle2"));
     _putenv("VCX_NANO_PORT=COM17");
     _putenv("VCX_NANO_STRICT=1");
     _putenv("VCX_NANO_VOLTAGE_POLICY=compat");
@@ -257,6 +269,14 @@ int main(void)
     CHECK(!ini_get("can_bus", option, sizeof(option)));
     CHECK(!ini_get("kline_pin", option, sizeof(option)));
     CHECK(!ini_get("periodic", option, sizeof(option)));
+#endif
+    /* Profile defaults when the INI says nothing. */
+    CHECK(!ini_get("keep_warm", option, sizeof(option)));
+    CHECK(!ini_get("kline_periodic", option, sizeof(option)));
+#ifdef VCX_MINIMAL_PROFILE
+    CHECK(!keep_warm_enabled() && KLINE_PER_DEFAULT == KLINE_PER_FIXED);
+#else
+    CHECK(keep_warm_enabled() && KLINE_PER_DEFAULT == KLINE_PER_HOST);
 #endif
     _putenv("VCX_NANO_PORT=COM18junk");
     ini_load(NULL);

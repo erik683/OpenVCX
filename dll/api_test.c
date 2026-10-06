@@ -454,6 +454,24 @@ static void repeat_halfduplex_test(void)
     dev_channels_clear();
 }
 
+/* The minimal profile answers every repeat IOCTL with the stock status 15,
+ * on Honda's own ISO9141 channel too, and never transmits. */
+static void minimal_repeat_test(void)
+{
+    reset(J2534_ISO9141); repeat_sends = 0;
+    repeat_log_input input = {0};
+    input.interval = 30; input.condition = 1;
+    input.tx.ProtocolID = input.mask.ProtocolID = input.pattern.ProtocolID = 3;
+    input.tx.TxFlags = 0x200; input.tx.DataSize = 4;
+    input.mask.DataSize = input.pattern.DataSize = 3;
+    unsigned long id = 0xAABBCCDD, msg = 1;
+    CHECK(PassThruIoctl(1, 0x8004, &input, &id) == ERR_INVALID_IOCTL_ID);
+    CHECK(id == 0xAABBCCDD && !s_repeat[0].used);
+    CHECK(PassThruIoctl(1, 0x8005, &msg, &id) == ERR_INVALID_IOCTL_ID);
+    CHECK(PassThruIoctl(1, 0x8006, &msg, NULL) == ERR_INVALID_IOCTL_ID);
+    repeat_due(); CHECK(repeat_sends == 0);
+}
+
 #ifdef VCX_RESEARCH_CONFIG
 static void repeat_repin_test(void)
 {
@@ -504,8 +522,14 @@ int main(void)
     release_call = CreateEvent(NULL, TRUE, FALSE, NULL);
     entered_twice = CreateEvent(NULL, TRUE, FALSE, NULL);
     close_done = CreateEvent(NULL, TRUE, FALSE, NULL);
+#ifdef VCX_MINIMAL_PROFILE
+    minimal_repeat_test();
+    (void)repeat_behavior_test; (void)repeat_halfduplex_test;
+#else
+    (void)minimal_repeat_test;
     repeat_behavior_test();
     repeat_halfduplex_test();
+#endif
 #ifdef VCX_RESEARCH_CONFIG
     repeat_repin_test();
 #endif
@@ -568,6 +592,7 @@ int main(void)
     CHECK(dev_five_baud_begin(1, &worst) == 0 && worst == 3375);
     dev_five_baud_end(1, false);
 
+#ifndef VCX_MINIMAL_PROFILE
     /* A bogus sync measurement is a failure, not two trustworthy key bytes. */
     reset(J2534_ISO9141);
     init_baud = 100; keys[0] = keys[1] = 0xAA; output.NumOfBytes = 2;
@@ -583,6 +608,20 @@ int main(void)
     CHECK(xact_n == 1 && xacts[0].op == VCX_OP_PERIODIC_CTRL && xacts[0].ch == 3 &&
           xacts[0].len == 1 && xacts[0].data[0] == 1);
     init_silent = false; s_fw_slot_used[3] = 0;
+#else
+    /* Minimal: the firmware's sync measurement is passed through unjudged, and
+     * a failed init leaves firmware timers as the firmware left them. */
+    reset(J2534_ISO9141);
+    init_baud = 100; output.NumOfBytes = 2;
+    CHECK(PassThruIoctl(1, J2534_IOCTL_FIVE_BAUD_INIT, &input, &output) == 0);
+    CHECK(output.NumOfBytes == 2 && keys[0] == 8 && keys[1] == 0x94);
+    init_baud = 10400;
+    reset(J2534_ISO9141);
+    s_fw_slot_used[3] = 1; init_silent = true; xact_n = 0; output.NumOfBytes = 2;
+    CHECK(PassThruIoctl(1, J2534_IOCTL_FIVE_BAUD_INIT, &input, &output) == ERR_TIMEOUT);
+    CHECK(xact_n == 0);
+    init_silent = false; s_fw_slot_used[3] = 0;
+#endif
 
     reset(J2534_CAN);
     PASSTHRU_MSG mask = {0}, pattern = {0}, flow = {0}; unsigned long id = 0xDEAD;
