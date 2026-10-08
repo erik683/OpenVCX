@@ -309,8 +309,8 @@ long pt_validate_config(uint32_t proto, uint32_t param, uint32_t value,
         break;
     /* Five-baud windows go to the firmware in microseconds and run on its
      * 2 kHz timer, whose period register is 2*ms-1 in 16 bits: W1 alone, and
-     * W2+W3+W4 plus the firmware's W4max and 10 ms as one period
-     * (notes/uart_slow_init_firmware.md). Larger values would wrap there. */
+     * W2+W3+W4 plus the firmware's W4max and 10 ms as one period.
+     * Larger values would wrap there. */
     case J2534_CFG_W1: case J2534_2_CFG_UEB_T1_MAX:
         if (value > 32767u) return ERR_INVALID_IOCTL_VALUE;
         break;

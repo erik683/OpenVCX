@@ -42,7 +42,7 @@ static bool built_is(uint8_t cmd_hi, uint8_t op, uint8_t chan, const uint8_t *pl
 static uint8_t rxbuf[VCX_MAX_CONTENT];
 static uint8_t wire[VCX_MAX_FRAME];
 
-/* Wire vectors from notes/host_protocol_map.md (link check, J1939 OPEN, CLOSE). */
+/* Known wire vectors (link check, J1939 OPEN, CLOSE). */
 static void test_known_frames(void)
 {
     static const uint8_t getinfo[] = {0xBB, 0x80, 0x00, 0x8C, 0x00, 0x0C, 0xBB};

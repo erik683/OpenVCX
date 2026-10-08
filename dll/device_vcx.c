@@ -5,8 +5,7 @@
 /*
  * device_vcx.c - device.h transport backend for the VCX Nano (Phase 2).
  *
- * Speaks the VCX Nano wire protocol (confirmed on a live CAN bus 2026-08-28)
- * ; see notes/message_path_protocol.md):
+ * Speaks the VCX Nano wire protocol (confirmed on a live CAN bus 2026-08-28):
  *
  *   frame  : BB <escaped(content)> BB
  *   content: 80 <cmd_hi> <cmd_lo> <chan> [payload...] <check>
@@ -79,8 +78,8 @@
  * switches (ISO9141 0x08032A1E, ISO14230 0x080310DA).  0x08032858's fast-init
  * loop waits on these fields divided by 100 against a free-running counter,
  * the same scale the vendor firmware uses for periodic-message intervals
- * (notes/hds_required_protocol_trace.md: "interval is microseconds, while
- * the J2534 API supplies milliseconds") -- so these need the same ms->us
+ * (the interval is microseconds, while
+ * the J2534 API supplies milliseconds) -- so these need the same ms->us
  * conversion, done in j2534_to_vcx_value() below. */
 #define VCX_PID_ISO_P1_MAX     0x0041
 #define VCX_PID_ISO_P2_MAX     0x0042
@@ -91,8 +90,8 @@
 #define VCX_PID_ISO_TINIL      0x0047
 /* Five-baud (slow) init windows, microseconds. Names are the ISO9141 setter's
  * own log strings (PID_SLOW_W1MAX..W4MIN); ISO9141, ISO14230, KW82 and KW1281
- * all accept them and feed the shared driver uart_slow_init_start
- * (notes/uart_slow_init_firmware.md). PID_SLOW_MODE (0x48) is overwritten by
+ * all accept them and feed the shared driver uart_slow_init_start.
+ * PID_SLOW_MODE (0x48) is overwritten by
  * the firmware's key-byte rule and PID_SLOW_W4MAX (0x4D) has no J2534
  * counterpart, so neither is sent. */
 #define VCX_PID_SLOW_W1_MAX    0x0049
@@ -121,7 +120,7 @@ static uint16_t proto_to_engine(uint32_t proto)
     case J2534_ISO15765:  return 0x8001;
     /* J2534-2 pin-select variants. Same engines as their base protocols --
      * the pins are chosen with J1962_PINS, not by the engine id. Mapping
-     * transcribed from the vendor DLL's own mapper (notes/host_protocol_map.md);
+     * transcribed from the vendor DLL's own mapper;
      * without these the DLL advertised ISO15765_PS in the registry and then
      * rejected it with ERR_INVALID_PROTOCOL_ID, which is what stopped FORScan
      * from ever reaching MS-CAN. */
@@ -211,7 +210,7 @@ static volatile LONG s_reader_run;
  * which the old single slot silently overwrote.  With no request sequence number,
  * flush the queue under s_io before each write and match replies by opcode and channel.
  * A late reply arriving after its timeout but after a new same-opcode/channel write can
- * still be misattributed.  We deliberately accept that: logs/openvcx.log records the
+ * still be misattributed.  We deliberately accept that: one bench log records the
  * failure once -- 24 consecutive 3 s 0x86 timeouts, then unaided recovery and 399 more
  * good 0x86 transactions -- and across the whole 83 s outage it sent not one frame: no
  * late reply, and no backlog on the way back.  Here, timeout means a
@@ -341,7 +340,7 @@ static DWORD       s_license_refresh_ms = VCX_LICENSE_REFRESH_MS;
  *     Pin 13 has no readback path, so READ_PROG_VOLTAGE has no honest
  *     numeric answer on this unit.
  *
- * Firmware analysis (notes/firmware_power_architecture.md) since established
+ * Firmware analysis since established
  * WHY, and every rule below now rests on a mechanism rather than on the bench
  * alone.  The J1962 switch fabric is five I2C I/O expanders behind a RAM
  * shadow, and the function that flushes that shadow to them (bus_mux_out) is
@@ -481,8 +480,7 @@ static bool rx_blocked_locked(uint8_t chan, const uint8_t *data, uint16_t len)
 }
 
 #define DEV_MAX_PERIODIC 8
-/* The firmware's per-engine VcxPeriodicMessageService holds ten timer records
- * (notes/tp_engine_vtable_recovery.md / periodic_timer_vendor_capture). */
+/* The firmware's per-engine VcxPeriodicMessageService holds ten timer records. */
 #define VCX_FW_PERIODIC_SLOTS 10
 typedef struct {
     bool in_use;
@@ -616,7 +614,7 @@ static bool keep_warm_enabled(void);
  * a warm link held across a logical close locks every other process out of the
  * device.  HDS does exactly that: it closes the port in testman.exe and, ~300 ms
  * later, launches DataListClient.exe or DTCMonitor.exe expecting to find the
- * interface free (see notes/hds_multiprocess_handoff.md).  A holder therefore
+ * interface free.  A holder therefore
  * publishes a named event while it owns a port, and gives the port up on request
  * whenever it has no J2534 session of its own open.
  *
@@ -2437,7 +2435,7 @@ void dev_disconnect(void)
 /* PassThruClose keeps the physical link warm by default.  Reopening the port
  * re-asserts DTR/RTS, which resets the Nano's USB-serial bridge and costs ~4 s
  * to re-answer -- the bulk of the 4.85 s median open->connect measured over the
- * 108 opens in notes/honda_hds_non_fail_analysis_2026-09-01.md.  Holding the
+ * 108 opens logged on 2026-09-01.  Holding the
  * port, reader thread and licence across a logical close collapses that for
  * every reopen after the first.  The handle is opened non-shared, so while it
  * is held no *other* process can open the device; a warm link is therefore
@@ -2738,9 +2736,7 @@ static void emit_connect_flag_params(uint8_t *blob, int *bn, int cap,
  * can1_claim_pins_6_14) and routes every other pin -- L-line/15 included --
  * through the same routing_matrix_build/commit-stub dead end.  So pin 7 is the
  * only K-line pin this hardware drives; do not add K-line/L-line pin-switching,
- * for the same reason the CAN whitelist below stops at 060E/030B.  Fuller
- * write-up (the five UART engines, the debug-menu-only exception) in
- * notes/can_bus_selection.md. */
+ * for the same reason the CAN whitelist below stops at 060E/030B. */
 #define VCX_PINS_HS_CAN 0x060Eu     /* pins 6/14  -> CAN1 */
 #define VCX_PINS_MS_CAN 0x030Bu     /* pins 3/11  -> CAN2 */
 #define VCX_PINS_KLINE  0x0700u     /* pin 7      -> the one wired K-line route */
@@ -3135,8 +3131,7 @@ static long do_filter(const uint8_t *p, uint16_t plen, uint8_t *resp, uint16_t *
          * Pattern first, like the flow-control record: the firmware stores the
          * first array as list_msg (the match value) and the second as mask_msg,
          * and VCXPT32 copies pattern then mask for every filter type.  The only
-         * captured PASS record was pass-all 0/0, which reads the same either way
-         * (notes/odis_jetta_2014_pretest_review.md F5 on odis_jetta_2014_testing). */
+         * captured PASS record was pass-all 0/0, which reads the same either way. */
         f[n++]=0x00 /* slot, set below */; f[n++]=0x01; f[n++]=0x01; f[n++]=(uint8_t)mlen;
         memcpy(&f[n], patt, pl); n += pl;
         memcpy(&f[n], mask, mlen); n += mlen;
@@ -3228,8 +3223,8 @@ static long do_clear_filters(uint32_t wire_id)
     return filters_replay(chan, prev_n);
 }
 
-/* Firmware-native periodic timers, recovered on 2026-08-30
- * (notes/periodic_timer_vendor_capture_2026-08-30.md).  The op-0x4A add record
+/* Firmware-native periodic timers, recovered on 2026-08-30 from a vendor capture.
+ * The op-0x4A add record
  * is:  01 <slot> C9 <buflen> 00 <interval_us LE32> <buffer[buflen]>  where the
  * buffer is four zero TX-flag bytes followed by the J2534 message Data (the 4-byte
  * CAN id big-endian plus payload), so buflen = 4 + DataSize.  interval_us is the
@@ -3248,7 +3243,6 @@ static long do_clear_filters(uint32_t wire_id)
  *
  * Record flag 0x80 makes ptimer_list_tx decode buffer[0..3] as big-endian
  * PDU TX flags, NOT a CAN id. Both CAN engines read the id from Data[0..3].
- * See notes/filter_periodic_recovery.md section 9 for the instruction trace.
  * Keep the captured zero-TX-flags scope: nonzero flags (29-bit ids, extended
  * addressing, frame padding) still use the host scheduler until separately
  * validated for firmware timers. The record flag byte 0xC9 is distinct from
@@ -3362,7 +3356,7 @@ static long fw_periodic_unpark(uint8_t chan)
 }
 
 /* Five-baud (slow) init support. Power-on slow-init defaults per engine (us),
- * from each engine's *_init_defaults (notes/uart_slow_init_firmware.md). */
+ * from each engine's *_init_defaults. */
 typedef struct {
     uint16_t engine;
     uint32_t tidle, w1, w2, w3, w4_min, w4_max;
@@ -4004,7 +3998,7 @@ static long do_set_prog_voltage(const uint8_t *p, uint16_t plen)
      * Worse for a pass-through: bus_prog_gnd() is the one path that never calls
      * bsp_vddp_set(), so asking to ground an energised pin would leave ~18 V
      * standing on it while the device answered OK.  Refusing is the only answer
-     * that does not mislead.  notes/firmware_power_architecture.md sec. 4.3. */
+     * that does not mislead. */
     if (want_gnd) {
         if (PROG_V_TRUTHFUL(s_prog_policy)) {
             dev_log("  set prog voltage pin=13 SHORT_TO_GROUND -> NOT_SUPPORTED "
@@ -4041,7 +4035,7 @@ static long do_set_prog_voltage(const uint8_t *p, uint16_t plen)
      * !!! Do not relax the gate so a non-13 request reaches this xact --
      * !!! "set 5 V on pin 6" would put ~18 V on pin 13.  Every policy,
      * !!! loose and compat included, must keep returning before this point for
-     * !!! a non-FEPS pin.  notes/firmware_power_architecture.md sec. 4.2. */
+     * !!! a non-FEPS pin. */
     uint32_t hw_volt = want_off ? J2534_VOLTAGE_OFF : VCX_FEPS_NOMINAL_MV;
     uint8_t body[5] = { (uint8_t)VCX_FEPS_PIN,
                         (uint8_t)(hw_volt >> 24), (uint8_t)(hw_volt >> 16),

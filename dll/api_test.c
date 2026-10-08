@@ -748,8 +748,8 @@ int main(void)
     CHECK(!g_open && !s_session_active && s_com == INVALID_HANDLE_VALUE);
     CloseHandle(entered); CloseHandle(release_call); CloseHandle(entered_twice); CloseHandle(close_done);
 
-    /* GETINFO block captured from a 1.9.4.2 Nano through the vendor DLL
-     * (logs/VCX.raw.j2534_connect_probe.exe.log), which decodes it as
+    /* GETINFO block captured from a 1.9.4.2 Nano through the vendor DLL,
+     * which decodes it as
      * VCX-NANO / 1.9.4.2 / 2023-03-31. */
     static const uint8_t devinfo[DEVINFO_LEN] = {
         0x2e,0x2a,0x9c,0x10,0x00,0x00,0x15,0x58,0x22,0x97,0x41,0x07,0x45,0x03,0x00,0x00,

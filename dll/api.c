@@ -59,7 +59,7 @@
 typedef char dll_version_fits[sizeof(DLL_VERSION_FULL) <= 80 ? 1 : -1];
 
 /* VCX_CmdDevGetInfo block offsets.  These are the fields the vendor VCX.DLL
- * decodes from the same 64 bytes in logs/VCX.raw.j2534_connect_probe.exe.log
+ * decodes from the same 64 bytes in a vendor-DLL connect capture
  * (HwName=VCX-NANO, FwVersion=1.9.4.2, FwDate=2023-03-31), and the version and
  * date words are the literal 02 04 09 01 00 1F 03 35 at 0x08036660 in the
  * 1.9.4.2 application image.  Other fields are not decoded here. */
